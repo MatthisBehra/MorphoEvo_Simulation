@@ -84,7 +84,7 @@ if __name__ == "__main__":
             c.act(current_time)
             camera.draw_creature(screen, c, is_best=(i == best_idx))
 
-        # "★ BEST" label above the leader
+        # "BEST" label above the leader
         lx, ly = camera.world_to_screen(
             creatures[best_idx].get_position(),
             creatures[best_idx].bodies[0].position.y + 35,
