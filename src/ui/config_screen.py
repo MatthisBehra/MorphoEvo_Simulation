@@ -128,14 +128,14 @@ class ConfigScreen:
         sx = self.panel_rect.x + 50
         sw = panel_w - 140
 
-        self.slider_seg = Slider(sx, self.panel_rect.y + 120, sw,
-                                 1, 10, 3, "SEGMENTS PER CREATURE", color=C_ACCENT)
+        self.slider_duration = Slider(sx, self.panel_rect.y + 120, sw,
+                                      5, 60, 15, "GENERATION DURATION (s)", color=C_ACCENT)
         self.slider_pop = Slider(sx, self.panel_rect.y + 230, sw,
                                  1, 30, 5, "POPULATION SIZE", color=C_ACCENT2)
         self.btn = Button(cx - 100, self.panel_rect.bottom - 65, 200, 44, "LAUNCH SIMULATION")
 
     def run(self):
-        """Block until the user validates, then return (n_segments, n_creatures)."""
+        """Block until the user validates, then return (gen_duration, n_creatures)."""
         tick = 0
         while True:
             self.clock.tick(60)
@@ -145,10 +145,10 @@ class ConfigScreen:
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     raise SystemExit
-                self.slider_seg.handle_event(event)
+                self.slider_duration.handle_event(event)
                 self.slider_pop.handle_event(event)
                 if self.btn.handle_event(event):
-                    return self.slider_seg.value, self.slider_pop.value
+                    return self.slider_duration.value, self.slider_pop.value
 
             self._draw(tick)
             pygame.display.flip()
@@ -198,7 +198,7 @@ class ConfigScreen:
         self.screen.blit(sub, (pr.centerx - sub.get_width() // 2, pr.y + 68))
 
         # Sliders
-        self.slider_seg.draw(self.screen, self.font_sm, self.font_val)
+        self.slider_duration.draw(self.screen, self.font_sm, self.font_val)
         self.slider_pop.draw(self.screen, self.font_sm, self.font_val)
 
         # Divider
