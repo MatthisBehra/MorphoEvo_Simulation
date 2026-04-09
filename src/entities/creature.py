@@ -309,7 +309,8 @@ class Creature:
     # ── Metrics ───────────────────────────────────────────────────────────────
 
     def get_position(self):
-        return self.bodies[0].position.x
+        x = self.bodies[0].position.x
+        return x if math.isfinite(x) else 0.0
 
     def get_fitness(self, start_x=100):
         """Env A fitness: horizontal distance minus metabolic energy and complexity penalties."""

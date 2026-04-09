@@ -72,12 +72,12 @@ class Slider:
 
 
 class Button:
-    def __init__(self, x, y, w, h, text):
+    def __init__(self, x: int, y: int, w: int, h: int, text: str):
         self.rect     = pygame.Rect(x, y, w, h)
         self.text     = text
         self._hovered = False
 
-    def handle_event(self, event):
+    def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.MOUSEMOTION:
             self._hovered = self.rect.collidepoint(event.pos)
         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -85,12 +85,59 @@ class Button:
                 return True
         return False
 
-    def draw(self, surface, font):
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
         color = C_ACCENT if self._hovered else (40, 180, 110)
         draw_rounded_rect(surface, color, self.rect, radius=10)
         txt = font.render(self.text, True, C_BG)
         tw, th = txt.get_size()
         surface.blit(txt, (self.rect.centerx - tw // 2, self.rect.centery - th // 2))
+
+
+class SpeedSelector:
+    """Sélecteur horizontal de vitesse de simulation (boutons-radio)."""
+
+    # Options : (label affiché, valeur numérique interne)
+    OPTIONS: list[tuple[str, int]] = [("1x", 1), ("4x", 4), ("8x", 8), ("HEADLESS", -1)]
+
+    def __init__(self, center_x: int, y: int, btn_w: int = 90, btn_h: int = 32, gap: int = 10):
+        self.selected: str = "4x"  # Défaut : 4x
+        self.btn_w = btn_w
+        self.btn_h = btn_h
+        self.gap = gap
+        # Calcul de la largeur totale pour centrer le groupe
+        total_w = len(self.OPTIONS) * btn_w + (len(self.OPTIONS) - 1) * gap
+        start_x = center_x - total_w // 2
+        # Pré-calcul des rectangles pour chaque option
+        self._rects: list[tuple[str, pygame.Rect]] = []
+        for i, (label, _val) in enumerate(self.OPTIONS):
+            rx = start_x + i * (btn_w + gap)
+            self._rects.append((label, pygame.Rect(rx, y, btn_w, btn_h)))
+
+    def handle_event(self, event: pygame.event.Event) -> None:
+        """Gère le clic sur un bouton du sélecteur."""
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            for label, rect in self._rects:
+                if rect.collidepoint(event.pos):
+                    self.selected = label
+                    break
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Dessine le groupe de boutons-radio."""
+        for label, rect in self._rects:
+            is_active = (label == self.selected)
+            bg = C_ACCENT if is_active else C_PANEL
+            fg = C_BG if is_active else C_MUTED
+            border_col = C_ACCENT if is_active else C_BORDER
+            draw_rounded_rect(surface, bg, rect, radius=8,
+                              border=1, border_color=border_col)
+            txt = font.render(label, True, fg)
+            tw, th = txt.get_size()
+            surface.blit(txt, (rect.centerx - tw // 2, rect.centery - th // 2))
+
+    @property
+    def selected_mode(self) -> str:
+        """Retourne la chaîne de mode normalisée pour la valeur de retour."""
+        return self.selected.lower()
 
 
 # ─── Main class ───────────────────────────────────────────────────────────────
@@ -118,7 +165,7 @@ class ConfigScreen:
         self.font_btn   = pygame.font.SysFont("Courier New", 18, bold=True)
 
         cx = self.sw // 2
-        panel_w, panel_h = 560, 380
+        panel_w, panel_h = 560, 540  # +80px pour le sélecteur de vitesse
         self.panel_rect = pygame.Rect(
             cx - panel_w // 2,
             self.sh // 2 - panel_h // 2,
@@ -128,15 +175,19 @@ class ConfigScreen:
         sx = self.panel_rect.x + 50
         sw = panel_w - 140
 
-        self.slider_duration = Slider(sx, self.panel_rect.y + 120, sw,
+        self.slider_duration = Slider(sx, self.panel_rect.y + 110, sw,
                                       5, 60, 15, "GENERATION DURATION (s)", color=C_ACCENT)
-        self.slider_pop = Slider(sx, self.panel_rect.y + 230, sw,
-                                 1, 30, 5, "POPULATION SIZE", color=C_ACCENT2)
+        self.slider_pop = Slider(sx, self.panel_rect.y + 210, sw,
+                                 1, 100, 30, "POPULATION SIZE", color=C_ACCENT2)
+        self.slider_showcase = Slider(sx, self.panel_rect.y + 310, sw,
+                                      0, 3, 3, "SHOWCASE DURATION (s)", color=C_ACCENT)
+        # Sélecteur de vitesse (entre le slider showcase et le bouton Launch)
+        self.speed_selector = SpeedSelector(cx, self.panel_rect.y + 390)
         self.btn = Button(cx - 100, self.panel_rect.bottom - 65, 200, 44, "LAUNCH SIMULATION")
 
-    def run(self):
-        """Block until the user validates, then return (gen_duration, n_creatures)."""
-        tick = 0
+    def run(self) -> tuple[int, int, int, str]:
+        """Bloque jusqu'à validation, retourne (gen_duration, n_creatures, showcase_duration, speed_mode)."""
+        tick: int = 0
         while True:
             self.clock.tick(60)
             tick += 1
@@ -147,8 +198,15 @@ class ConfigScreen:
                     raise SystemExit
                 self.slider_duration.handle_event(event)
                 self.slider_pop.handle_event(event)
+                self.slider_showcase.handle_event(event)
+                self.speed_selector.handle_event(event)
                 if self.btn.handle_event(event):
-                    return self.slider_duration.value, self.slider_pop.value
+                    return (
+                        self.slider_duration.value,
+                        self.slider_pop.value,
+                        self.slider_showcase.value,
+                        self.speed_selector.selected_mode,
+                    )
 
             self._draw(tick)
             pygame.display.flip()
@@ -200,6 +258,14 @@ class ConfigScreen:
         # Sliders
         self.slider_duration.draw(self.screen, self.font_sm, self.font_val)
         self.slider_pop.draw(self.screen, self.font_sm, self.font_val)
+        self.slider_showcase.draw(self.screen, self.font_sm, self.font_val)
+
+        # Label du sélecteur de vitesse
+        speed_lbl = self.font_sm.render("SPEED MODE", True, C_MUTED)
+        self.screen.blit(speed_lbl, (pr.centerx - speed_lbl.get_width() // 2, pr.y + 358))
+
+        # Sélecteur de vitesse
+        self.speed_selector.draw(self.screen, self.font_sm)
 
         # Divider
         div_y = pr.bottom - 80
