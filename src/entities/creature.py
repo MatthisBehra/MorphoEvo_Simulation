@@ -1,5 +1,4 @@
 import pymunk
-import pygame
 import math
 import random
 import copy
@@ -318,18 +317,25 @@ class Creature:
         raw = distance - ENERGY_PENALTY * self._energy_spent
         return raw - 0.5 * count_segments(self.dna)
 
-    def get_fitness_b(self, start_x, terrain_zones,
-                      w_dist=1.0, w_stab=0.3, w_terrain=0.5):
+    def get_fitness_b(self, start_x, terrain_zones, ground_y=5,
+                      w_dist=0.7, w_stab=1.0, w_terrain=2.0, w_elev=0.5):
         """
-        Env B fitness: distance + trunk stability + inclined-terrain bonus,
-        minus complexity penalty (already in get_fitness).
+        Env B fitness: distance + trunk stability + inclined-terrain bonus + elevation,
+        with complexity REWARDED (opposite pressure from Env A).
 
         terrain_zones: [(shape, color, x_start, x_end, angle_rad), …]
-        The terrain bonus rewards distance covered on steep slopes:
-        bonus = Σ  covered_length × |sin(angle)|
+
+        Key design choices to maximise morphological divergence vs Env A:
+        - w_dist reduced: raw distance is less decisive than in Env A.
+        - w_stab increased: a tipping creature fails on steep slopes.
+        - w_terrain greatly increased: steep-slope traversal is the primary pressure.
+        - w_elev: bonus for the torso being physically higher (actual climbing).
+        - complexity_bonus: offsets the −0.5×n_segments from get_fitness and adds
+          a net +0.2 per extra segment, so Env B favours complex multi-limbed
+          creatures while Env A still penalises them.
         """
-        distance  = self.get_fitness(start_x)
-        stability = self.get_trunk_stability()
+        base_fitness = self.get_fitness(start_x)   # includes -0.5 × n_segments
+        stability    = self.get_trunk_stability()
 
         x_pos = self.get_position()
         terrain_bonus = 0.0
@@ -340,20 +346,17 @@ class Creature:
             if covered > 0:
                 terrain_bonus += covered * abs(math.sin(angle))
 
-        return w_dist * distance + w_stab * stability + w_terrain * terrain_bonus
+        # Elevation: how high the torso currently sits above the base ground level
+        elevation = max(0.0, self.bodies[0].position.y - ground_y) if self.bodies else 0.0
 
-    # ── Rendering ─────────────────────────────────────────────────────────────
+        # Net +0.2 per segment (cancels the -0.5 penalty then adds a small reward)
+        complexity_bonus = 0.7 * count_segments(self.dna)
 
-    def draw(self, screen, screen_height):
-        for shape in self.shapes:
-            verts = []
-            for v in shape.get_vertices():
-                world_v = v.rotated(shape.body.angle) + shape.body.position
-                verts.append((world_v.x, screen_height - world_v.y))
-
-            color = getattr(shape, "color", (120, 120, 120))
-            pygame.draw.polygon(screen, color, verts)
-            pygame.draw.polygon(screen, (0, 0, 0), verts, 2)
+        return (w_dist * base_fitness
+                + w_stab * stability
+                + w_terrain * terrain_bonus
+                + w_elev * elevation
+                + complexity_bonus)
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 

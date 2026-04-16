@@ -5,11 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run the simulation (graphical, with ConfigScreen)
+# Headless mode (default — zero pygame, max speed)
 python src/main.py
+python src/main.py --pop 30 --duration 15 --generations 50
 
-# Run multi-run headless mode (K=3 runs, rapport de convergence)
+# Graphical mode (pygame window + ConfigScreen)
+python src/main.py --gui
+
+# Multi-run (K=4 paired runs, 8 workers, graphs + report)
 python src/main.py --multi-run
+python src/main.py --multi-run --runs 4 --workers 8 --pop 30 --generations 20
 
 # Install dependencies (venv must be activated first)
 pip install -r requirements.txt
@@ -28,17 +33,18 @@ Toujours préfixer les commandes bash avec `rtk` (ex: `rtk git diff`, `rtk git s
 
 ### Entry point & simulation loop
 
-`src/main.py` is the sole entry point. It:
-1. Shows `ConfigScreen` to collect `gen_duration`, `n_creatures`, `showcase_duration`, and `speed_mode` from the user.
-2. Creates two `Environment`s: Env A (friction zones) and Env B (procedural terrain).
-3. Spawns `n_creatures` `Creature` objects in each environment.
-4. Runs the pygame main loop at 60 FPS, executing `SPEED_FACTOR` physics sub-steps per frame.
+`src/main.py` is the sole entry point. It uses `argparse` to dispatch:
+- **Default (no flag):** headless mode via `src/simulation.py` — zero pygame, runs as fast as CPU allows.
+- **`--gui`:** graphical mode — imports pygame, shows `ConfigScreen`, split-screen rendering at 60 FPS.
+- **`--multi-run`:** K independent headless runs via `RunManager`.
+
+`src/simulation.py` contains the pure headless loop and shared helpers (`create_population`, `setup_env_b`) imported by both paths.
 
 **Timing model — two clocks:**
 - `sim_time` advances by `TIME_STEP` per physics sub-step (decoupled from wall clock). Used for the sine oscillator in `act()` and for generation/end-of-gen timers.
-- `now_wall = pygame.time.get_ticks() / 1000.0` is used **only** for the showcase countdown — because `sim_time` is paused during `STATE_SHOWCASE` (no physics runs then).
+- `now_wall = pygame.time.get_ticks() / 1000.0` is used **only** in GUI mode for the showcase countdown — because `sim_time` is paused during `STATE_SHOWCASE` (no physics runs then). In headless mode, `time.perf_counter()` is used for wall-clock timing.
 
-**State machine:** `STATE_SIMULATING` → `STATE_SHOWCASE` → back to `STATE_SIMULATING`. Breeding happens at the `SHOWCASE → SIMULATING` transition.
+**State machine (GUI only):** `STATE_SIMULATING` → `STATE_SHOWCASE` → back to `STATE_SIMULATING`. Breeding happens at the `SHOWCASE → SIMULATING` transition. In headless mode there is no showcase — breeding happens immediately after fitness evaluation.
 
 ### Creature & DNA tree (`src/entities/creature.py`)
 
@@ -80,14 +86,15 @@ Never invert Y manually outside of this method.
 
 | File | Responsibility |
 |------|---------------|
-| `src/main.py` | Game loop, HUD, leader tracking, state machine |
+| `src/main.py` | CLI dispatcher (argparse), GUI game loop when `--gui` |
+| `src/simulation.py` | Pure headless simulation loop (zero pygame), shared helpers |
 | `src/entities/creature.py` | DNA helpers, physics tree construction, `act()`, fitness |
 | `src/physics/environment.py` | Pymunk `Space`, friction zones (Env A), procedural terrain (Env B), velocity cap |
 | `src/ui/camera.py` | Smooth horizontal scroll, coordinate transform, creature/ground drawing |
 | `src/ui/config_screen.py` | Pre-simulation config UI — returns `(gen_duration, n_creatures, showcase_duration, speed_mode)` |
 | `src/ui/summary_screen.py` | Semi-transparent inter-generation overlay banner |
 | `src/evolution/genetics.py` | Selection, crossover, niching, `breed_next_generation` |
-| `src/evolution/run_manager.py` | Multi-run headless manager — K runs, genotype distance, convergence report |
+| `src/evolution/run_manager.py` | Multi-run manager — K paired runs (A+B), multiprocessing, distance matrices, matplotlib graphs |
 | `src/utils/csv_export.py` | Per-generation CSV stats export to `evolution_data.csv` |
 
 ---
@@ -115,10 +122,12 @@ Never invert Y manually outside of this method.
 - Asymmetric emergent morphology (2 segments initial, cap 12)
 - Complexity penalty (−0.5 × n_segments)
 - Population size configurable 1–100
-- **Speed mode selector** in ConfigScreen: `1x`, `4x`, `8x`, `HEADLESS`
-- **Headless mode** (`HEADLESS` flag): no graphical rendering, no FPS cap, SPEED_FACTOR=8
-- **Multi-run mode** (`--multi-run` CLI flag): K=3 independent headless runs, genotype distance matrix, convergence report in `runs/report.json`
-- Run Manager (`src/evolution/run_manager.py`): saves best genome per run in `runs/run_{k}.json`
+- **Speed mode selector** in ConfigScreen (GUI only): `1x`, `4x`, `8x`, `HEADLESS`
+- **Headless mode** (default, no `--gui`): zero pygame dependency, no FPS cap, max speed. CLI args: `--pop`, `--duration`, `--generations`, `--speed`
+- **GUI mode** (`--gui`): full pygame window with ConfigScreen, split-screen rendering, showcase banners
+- **Multi-run mode** (`--multi-run`): K paired runs (same initial pop for A+B), multiprocessing (2K workers). Generates distance matrices A×A / B×B / A×B, convergence report, and matplotlib graphs in `runs/`
+- Run Manager (`src/evolution/run_manager.py`): multiprocessing.Pool, saves `run_{k}_{A|B}.json` + `report.json` + 3 PNG figures
+- CLI args: `--runs K` (default 4), `--workers W` (default cpu_count), `--pop`, `--duration`, `--generations`
 
 ## Référence scientifique
 En cas de doute sur les définitions de recherche (fitness, diversité morphologique), consulter `/docs`.

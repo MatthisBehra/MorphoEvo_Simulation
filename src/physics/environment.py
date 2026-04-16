@@ -166,16 +166,16 @@ class Environment:
     _TERRAIN_NORMAL = (100, 70, 30)    # brown
     _TERRAIN_SOFT   = (70, 100, 60)    # muddy green
 
-    def generate_terrain(self, total_x, ground_y=5, seg_length=200,
-                         max_angle_deg=25, soft_zone_prob=0.25,
-                         thickness=5.0, flat_start=400):
+    def generate_terrain(self, total_x, ground_y=5, seg_length=150,
+                         max_angle_deg=40, soft_zone_prob=0.35,
+                         thickness=5.0, flat_start=150):
         """
         Generate procedural terrain made of chained inclined segments.
 
         - First *flat_start* units are flat (spawning area).
         - Each subsequent segment has a random slope ∈ [−max_angle_deg, +max_angle_deg].
-        - ~25 % of segments past the flat zone are "soft" (high friction, zero restitution).
-        - Y is clamped to [ground_y − 40, ground_y + 80] to keep terrain walkable.
+        - ~35 % of segments past the flat zone are "soft" (high friction, zero restitution).
+        - Y is clamped to [ground_y − 60, ground_y + 120] to allow more extreme relief.
 
         Stores full data in self.terrain_zones for fitness calculation.
         Returns [(shape, color), …] for rendering (same format as add_friction_zones).
@@ -195,7 +195,7 @@ class Environment:
             end_y = y + math.tan(angle_rad) * seg_length
 
             # Clamp Y then recompute actual angle
-            end_y = max(ground_y - 40, min(ground_y + 80, end_y))
+            end_y = max(ground_y - 60, min(ground_y + 120, end_y))
             angle_rad = math.atan2(end_y - y, end_x - x)
 
             is_soft = x >= flat_start and random.random() < soft_zone_prob
