@@ -225,6 +225,18 @@ class Environment:
 
     # ── Simulation ────────────────────────────────────────────────────────────
 
+    _MAX_LINEAR_VEL  = 3000.0   # world units/s — prevents physics explosion
+    _MAX_ANGULAR_VEL =   50.0   # rad/s
+
     def step(self, dt):
         """Advance the physics simulation by dt seconds."""
         self.space.step(dt)
+        for body in self.space.bodies:
+            if body.body_type != pymunk.Body.DYNAMIC:
+                continue
+            spd = body.velocity.length
+            if spd > self._MAX_LINEAR_VEL:
+                body.velocity = body.velocity * (self._MAX_LINEAR_VEL / spd)
+            av = abs(body.angular_velocity)
+            if av > self._MAX_ANGULAR_VEL:
+                body.angular_velocity *= self._MAX_ANGULAR_VEL / av
