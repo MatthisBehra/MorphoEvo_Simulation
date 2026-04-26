@@ -18,6 +18,7 @@ import random
 import copy
 import sys
 import time as _time
+from datetime import datetime
 from typing import Any
 from multiprocessing import Pool, Event
 
@@ -25,7 +26,10 @@ from multiprocessing import Pool, Event
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from physics.environment import Environment
-from entities.creature import Creature, random_dna, count_segments
+from entities.creature import (
+    Creature, random_dna, count_segments, tree_depth, dna_total_area,
+    iter_genes, SCALAR_GENE_KEYS, GENE_BOUNDS,
+)
 from evolution.genetics import breed_next_generation
 
 
@@ -36,32 +40,105 @@ GROUND_Y:  int   = 5
 SPAWN_X:   float = 300.0
 SPAWN_Y:   float = GROUND_Y + 200
 
-_SCALAR_KEYS: list[str] = [
-    "width", "height", "attach_angle", "rot_min", "rot_max",
-    "motor_force", "motor_speed", "motor_phase", "friction", "joint_damping",
-]
+_SCALAR_KEYS: list[str] = SCALAR_GENE_KEYS  # re-exported for back-compat
+
+_MAX_SEGMENTS_REF: int = 12  # cap used by mutate_structure
 
 
 # ─── DNA utilities ──────────────────────────────────────────────────────────
 
-def _flatten_dna(dna: dict) -> list[float]:
-    """Flatten a DNA tree into a numeric vector (depth-first)."""
+def _normalised_scalar_vector(dna: dict) -> list[float]:
+    """
+    Flatten DNA and min-max normalise each gene against GENE_BOUNDS so that
+    every dimension contributes in [0, 1]. Prevents motor_force
+    (scale 10k-2M) from dominating the distance.
+    """
     values: list[float] = []
     for key in _SCALAR_KEYS:
-        values.append(float(dna.get(key, 0.0)))
+        lo, hi = GENE_BOUNDS[key]
+        rng = max(hi - lo, 1e-9)
+        values.append((float(dna.get(key, lo)) - lo) / rng)
     for child in dna.get("children", []):
-        values.extend(_flatten_dna(child))
+        values.extend(_normalised_scalar_vector(child))
     return values
 
 
 def genotype_distance(dna_a: dict, dna_b: dict) -> float:
-    """Euclidean distance between two flattened genomes (zero-padded)."""
-    vec_a = _flatten_dna(dna_a)
-    vec_b = _flatten_dna(dna_b)
-    max_len = max(len(vec_a), len(vec_b))
-    vec_a.extend([0.0] * (max_len - len(vec_a)))
-    vec_b.extend([0.0] * (max_len - len(vec_b)))
-    return math.sqrt(sum((a - b) ** 2 for a, b in zip(vec_a, vec_b)))
+    """
+    Composite genotype distance in [0, ~2] that separates *structure* from
+    *parameter drift*, both normalised so neither dominates:
+
+        d = sqrt( structural² + scalar² )
+
+    where
+        structural = |Δ n_segments| / MAX_SEGMENTS_REF  ∈ [0, 1]
+        scalar     = RMS(|Δ gene_i|)  over shared segments, after min-max
+                     normalisation by GENE_BOUNDS  ∈ [0, √M]
+
+    This replaces the previous raw Euclidean distance, which was dominated
+    by `motor_force` (scale ~1e6) and inflated by zero-padding when segment
+    counts differed. See commit history for rationale.
+    """
+    # Structural component
+    n_a = count_segments(dna_a)
+    n_b = count_segments(dna_b)
+    structural = abs(n_a - n_b) / max(_MAX_SEGMENTS_REF, 1)
+
+    # Scalar component: pad the shorter vector with the mean of the longer
+    # one so "missing" segments don't create a spurious max-range delta.
+    vec_a = _normalised_scalar_vector(dna_a)
+    vec_b = _normalised_scalar_vector(dna_b)
+    if len(vec_a) < len(vec_b):
+        vec_a.extend([0.5] * (len(vec_b) - len(vec_a)))
+    elif len(vec_b) < len(vec_a):
+        vec_b.extend([0.5] * (len(vec_a) - len(vec_b)))
+
+    if not vec_a:
+        return structural
+    diffs = [a - b for a, b in zip(vec_a, vec_b)]
+    scalar = math.sqrt(sum(d * d for d in diffs) / len(diffs))
+
+    return math.sqrt(structural * structural + scalar * scalar)
+
+
+# ─── Population morphology stats (logged per generation) ────────────────────
+
+def _dna_morph_vector(dna: dict) -> dict[str, float]:
+    """Per-creature morphology summary used for population-level logging."""
+    genes = list(iter_genes(dna))
+    n = len(genes)
+    out: dict[str, float] = {
+        "n_segments": float(n),
+        "depth":      float(tree_depth(dna)),
+        "total_area": float(dna_total_area(dna)),
+    }
+    for key in SCALAR_GENE_KEYS:
+        out[key] = float(sum(g[key] for g in genes) / n) if n else 0.0
+    return out
+
+
+def _population_stats(dnas: list[dict]) -> dict[str, dict[str, float]]:
+    """
+    Aggregate morphology over the entire population for a generation.
+    Returns {metric: {mean, std, median, min, max}} — enables per-gen
+    population-level analysis (not just the best individual).
+    """
+    if not dnas:
+        return {}
+    rows = [_dna_morph_vector(d) for d in dnas]
+    keys = list(rows[0].keys())
+    import statistics
+    out: dict[str, dict[str, float]] = {}
+    for k in keys:
+        vals = [r[k] for r in rows]
+        out[k] = {
+            "mean":   float(sum(vals) / len(vals)),
+            "std":    float(statistics.pstdev(vals)) if len(vals) > 1 else 0.0,
+            "median": float(statistics.median(vals)),
+            "min":    float(min(vals)),
+            "max":    float(max(vals)),
+        }
+    return out
 
 
 # ─── Worker stop signal (shared across processes) ───────────────────────────
@@ -95,6 +172,7 @@ def _run_single_env(task: dict) -> dict:
     n_generations: int  = task["n_generations"]
     pop_size:     int   = task["pop_size"]
     gen_duration: float = task["gen_duration"]
+    lineage_path: str   = task["lineage_path"]
 
     dnas = [copy.deepcopy(d) for d in initial_dnas]
 
@@ -105,6 +183,8 @@ def _run_single_env(task: dict) -> dict:
 
     gen = 0
     gen_label = str(n_generations) if n_generations else "inf"
+
+    lineage_f = open(lineage_path, "w", encoding="utf-8")
 
     while True:
         # Stop conditions
@@ -158,6 +238,24 @@ def _run_single_env(task: dict) -> dict:
             best_fitness_overall = gen_best_fitness
             best_dna_overall = copy.deepcopy(dnas[gen_best_idx])
 
+        lineage_f.write(json.dumps({
+            "gen":          gen + 1,
+            "best_fitness": gen_best_fitness,
+            "n_segments":   count_segments(dnas[gen_best_idx]),
+            "best_dna":     dnas[gen_best_idx],
+            "fitness_pop": {
+                "mean":   float(sum(fitnesses) / len(fitnesses)),
+                "std":    float(
+                    (sum((f - sum(fitnesses) / len(fitnesses)) ** 2
+                         for f in fitnesses) / len(fitnesses)) ** 0.5
+                ),
+                "min":    float(min(fitnesses)),
+                "max":    float(max(fitnesses)),
+            },
+            "pop_stats":   _population_stats(dnas),
+        }, ensure_ascii=False) + "\n")
+        lineage_f.flush()
+
         print(
             f"  [{env_type}-{run_id}] Gen {gen + 1:>3}/{gen_label}"
             f"  best={gen_best_fitness:>8.1f}",
@@ -171,6 +269,8 @@ def _run_single_env(task: dict) -> dict:
         # Breed
         dnas = breed_next_generation(dnas, fitnesses, pop_size)
         gen += 1
+
+    lineage_f.close()
 
     return {
         "run_id":             run_id,
@@ -368,15 +468,22 @@ class RunManager:
     # ── Main entry ───────────────────────────────────────────────────────
 
     def run_all(self, output_dir: str = None) -> dict[str, Any]:
+        """
+        Launch K paired runs in parallel, save results + report + graphs.
+
+        Each invocation creates a fresh timestamped folder under ``runs/``
+        (``runs/multirun_YYYY-MM-DD_HHMMSS``) so previous runs are never
+        overwritten. Pass ``output_dir`` explicitly to override.
+        """
         if output_dir is None:
             # Default to project root / runs (not src/runs)
             project_root = os.path.dirname(os.path.dirname(
                 os.path.dirname(os.path.abspath(__file__))
             ))
-            output_dir = os.path.join(project_root, "runs")
-        """
-        Launch K paired runs in parallel, save results + report + graphs.
-        """
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            output_dir = os.path.join(
+                project_root, "runs", f"multirun_{timestamp}"
+            )
         os.makedirs(output_dir, exist_ok=True)
 
         # 1. Generate K shared initial populations
@@ -396,6 +503,9 @@ class RunManager:
                     "n_generations": self.n_generations,
                     "pop_size":     self.pop_size,
                     "gen_duration": self.gen_duration,
+                    "lineage_path": os.path.join(
+                        output_dir, f"run_{k}_{env_type}_lineage.jsonl"
+                    ),
                 })
 
         # 3. Run in parallel with shared stop event

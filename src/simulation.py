@@ -6,7 +6,7 @@ Runs the dual-environment morphological evolution as fast as the CPU allows.
 import time
 
 from physics.environment import Environment
-from entities.creature import Creature, count_segments
+from entities.creature import Creature
 from evolution.genetics import breed_next_generation, compute_diversity
 from utils.data_store import DataStore
 
@@ -104,12 +104,16 @@ def run_headless(n_creatures, gen_duration, n_generations=None):
             div_a = compute_diversity(dnas_a)
             div_b = compute_diversity(dnas_b)
 
-            store.append_generation(
-                gen_num, fits_a, fits_b, dnas_a, dnas_b,
-                div_a, div_b, count_segments,
-            )
-
             wall_elapsed = time.perf_counter() - wall_start
+
+            store.append_generation(
+                gen_num,
+                creatures_a, creatures_b,
+                fits_a, fits_b,
+                div_a, div_b,
+                start_x=SPAWN_X,
+                wall_time_s=wall_elapsed,
+            )
             print(
                 f"Gen {gen_num:>4d} | "
                 f"A best={max(fits_a):>8.1f}  avg={sum(fits_a)/len(fits_a):>8.1f} | "

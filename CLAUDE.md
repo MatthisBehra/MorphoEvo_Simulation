@@ -95,7 +95,7 @@ Never invert Y manually outside of this method.
 | `src/ui/summary_screen.py` | Semi-transparent inter-generation overlay banner |
 | `src/evolution/genetics.py` | Selection, crossover, niching, `breed_next_generation` |
 | `src/evolution/run_manager.py` | Multi-run manager — K paired runs (A+B), multiprocessing, distance matrices, matplotlib graphs |
-| `src/utils/csv_export.py` | Per-generation CSV stats export to `evolution_data.csv` |
+| `src/utils/data_store.py` | Per-session `stats.csv` + `lineage.jsonl` + `session.json` writer |
 
 ---
 
@@ -118,7 +118,7 @@ Never invert Y manually outside of this method.
 - `SPEED_FACTOR` constant in `main.py` — number of physics sub-steps per rendered frame (default 4 → 4× faster wall-clock evolution)
 - Fitness: Env A = distance − energy − complexity; Env B = distance + stability + terrain bonus − complexity
 - Env B procedural terrain: inclined segments [−25°, +25°] + soft zones, regenerated each generation
-- Auto-export to `evolution_data.csv` (fitness, diversity, complexity per generation)
+- Per-session output in `data/session_YYYY-MM-DD_HHMMSS/` — `stats.csv` (52-col schema: fitness distribution, morphology, physical, gene averages, A↔B divergence), `lineage.jsonl` (best DNA/gen), `session.json` (parameters)
 - Asymmetric emergent morphology (2 segments initial, cap 12)
 - Complexity penalty (−0.5 × n_segments)
 - Population size configurable 1–100

@@ -55,6 +55,63 @@ def count_segments(dna):
     return 1 + sum(count_segments(child) for child in dna["children"])
 
 
+SCALAR_GENE_KEYS = [
+    "width", "height", "attach_angle", "rot_min", "rot_max",
+    "motor_force", "motor_speed", "motor_phase", "friction", "joint_damping",
+]
+
+
+# Hard bounds applied after every mutation to prevent unbounded drift.
+# Slightly wider than the random_segment_gene ranges so evolution still has room.
+GENE_BOUNDS = {
+    "width":         (5.0,        100.0),
+    "height":        (3.0,         40.0),
+    "attach_angle":  (-math.pi,    math.pi),
+    "rot_min":       (-2.0,        -0.05),
+    "rot_max":       (0.05,         2.0),
+    "motor_force":   (10_000.0,    2_000_000.0),
+    "motor_speed":   (0.3,         15.0),
+    "motor_phase":   (0.0,         2 * math.pi),
+    "friction":      (0.0,         5.0),
+    "joint_damping": (10.0,        2_000.0),
+}
+
+
+def tree_depth(dna):
+    """Depth of the DNA tree. Root alone = 0."""
+    if not dna["children"]:
+        return 0
+    return 1 + max(tree_depth(child) for child in dna["children"])
+
+
+def avg_branching(dna):
+    """Average number of children across all non-leaf nodes. Returns 0 if leaf-only."""
+    total_children = 0
+    n_internal = 0
+    stack = [dna]
+    while stack:
+        node = stack.pop()
+        if node["children"]:
+            total_children += len(node["children"])
+            n_internal += 1
+            stack.extend(node["children"])
+    return total_children / n_internal if n_internal else 0.0
+
+
+def iter_genes(dna):
+    """Yield every gene node (root + descendants) in the DNA tree."""
+    stack = [dna]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(node["children"])
+
+
+def dna_total_area(dna):
+    """Sum of width × height over every segment."""
+    return sum(g["width"] * g["height"] for g in iter_genes(dna))
+
+
 def _collect_all_nodes(dna, parent=None, result=None):
     """Return a flat list of (node, parent) tuples for every node in the tree."""
     if result is None:
@@ -98,13 +155,15 @@ def mutate_dna(dna, mutation_rate=0.15, mutation_strength=0.25):
     Recursively mutates each scalar gene value by a small random amount.
     Structural mutations (add/remove segments) are handled separately by mutate_structure().
     """
-    scalar_keys = ["width", "height", "attach_angle", "rot_min", "rot_max",
-                   "motor_force", "motor_speed", "motor_phase", "friction",
-                   "joint_damping"]
-    for key in scalar_keys:
+    for key in SCALAR_GENE_KEYS:
         if random.random() < mutation_rate:
             delta = dna[key] * mutation_strength * random.uniform(-1, 1)
             dna[key] += delta
+        lo, hi = GENE_BOUNDS[key]
+        if dna[key] < lo:
+            dna[key] = lo
+        elif dna[key] > hi:
+            dna[key] = hi
 
     if dna["rot_min"] > dna["rot_max"]:
         dna["rot_min"], dna["rot_max"] = dna["rot_max"], dna["rot_min"]
@@ -300,10 +359,6 @@ class Creature:
         mean     = sum(self._angle_samples) / n
         variance = sum((a - mean) ** 2 for a in self._angle_samples) / n
         return 1.0 / (1.0 + variance ** 0.5)
-
-    def reset_metrics(self):
-        self._angle_samples = []
-        self._energy_spent  = 0.0
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 

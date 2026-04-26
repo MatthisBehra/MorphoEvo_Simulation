@@ -89,7 +89,7 @@ def _run_gui():
     from ui.config_screen import ConfigScreen
     from ui.camera import Camera
     from ui.summary_screen import draw_summary_overlay
-    from evolution.genetics import breed_next_generation, compute_diversity, count_segments
+    from evolution.genetics import breed_next_generation, compute_diversity
     from utils.data_store import DataStore
     from simulation import create_population, setup_env_b, GROUND_Y, SPAWN_X, ZONE_WIDTH
 
@@ -197,10 +197,12 @@ def _run_gui():
         surf_b   = pygame.Surface((SCREEN_WIDTH, HALF_H))
 
     # ─── Simulation state ─────────────────────────────────────────────────────
+    import time as _time
     gen_num        = 1
     state          = STATE_SIMULATING
     sim_time       = 0.0
     gen_start      = 0.0
+    gen_wall_start = _time.perf_counter()
     showcase_start = 0.0
     showcase_stats = {"best_a": 0.0, "best_b": 0.0}
 
@@ -244,9 +246,15 @@ def _run_gui():
 
                 div_a = compute_diversity(dnas_a)
                 div_b = compute_diversity(dnas_b)
+
+                wall_elapsed = _time.perf_counter() - gen_wall_start
                 store.append_generation(
-                    gen_num, fits_a, fits_b, dnas_a, dnas_b,
-                    div_a, div_b, count_segments,
+                    gen_num,
+                    creatures_a, creatures_b,
+                    fits_a, fits_b,
+                    div_a, div_b,
+                    start_x=SPAWN_X,
+                    wall_time_s=wall_elapsed,
                 )
 
                 new_dnas_a = breed_next_generation(dnas_a, fits_a, n_creatures)
@@ -264,6 +272,7 @@ def _run_gui():
 
                 gen_num   += 1
                 gen_start  = sim_time
+                gen_wall_start = _time.perf_counter()
                 state      = STATE_SIMULATING
 
         # ── Rendering (skip if headless) ──────────────────────────────────────
