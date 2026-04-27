@@ -43,25 +43,28 @@ MorphoEvo_Simulation/
 │   ├── entities/
 │   │   └── creature.py            # ADN, opérateurs génétiques, classe Creature
 │   ├── physics/
-│   │   ├── environment.py         # Espace pymunk, sol, obstacles
-│   │   └── renderer.py            # Utilitaire de rendu pymunk (debug/sol)
+│   │   └── environment.py         # Espace pymunk, zones de friction (Env A), terrain procédural (Env B)
 │   ├── evolution/
 │   │   ├── __init__.py
-│   │   └── genetics.py            # Sélection, croisement, niching
+│   │   ├── genetics.py            # Sélection, croisement, niching
+│   │   └── run_manager.py         # Multi-run paré A+B, multiprocessing, matrices de distance
 │   ├── ui/
 │   │   ├── camera.py              # Caméra scrolling + transformations monde→écran
 │   │   ├── config_screen.py       # Écran de configuration pré-simulation
 │   │   └── summary_screen.py      # Bannière de showcase entre générations
-│   └── utils/
-│       ├── __init__.py
-│       └── csv_export.py          # Écriture des statistiques par génération
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   └── data_store.py          # stats.csv + lineage.jsonl + session.json par session
+│   ├── main.py                    # Point d'entrée (argparse : --gui / --multi-run / headless par défaut)
+│   └── simulation.py              # Boucle headless pure (zéro pygame)
+├── analyze.py                     # Plots matplotlib à partir de data/session_*/stats.csv
 ├── docs/
-│   ├── specifications.md          # Ce fichier
 │   ├── article_recherche_BEHRA.docx
 │   └── RSL_Evolution_Morphologique_BEHRA_v3.docx
 ├── requirements.txt
 ├── CLAUDE.md
-└── evolution_data.csv             # Créé au lancement, à la racine du projet
+├── data/                          # Sorties par session (gitignoré)
+└── runs/                          # Sorties multi-run (gitignoré)
 ```
 
 ---

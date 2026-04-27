@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 MorphoEvo - Evolution Data Analysis
-Usage: python analyze.py [--csv evolution_data.csv] [--out plots/]
+
+By default, loads the most recent session from data/session_*/stats.csv.
+Override with --csv PATH or --session DIR.
+
+Usage:
+    python analyze.py                          # latest session, plots -> <session>/plots/
+    python analyze.py --csv evolution_data.csv # specific CSV
+    python analyze.py --session data/session_2026-04-17_120000
+    python analyze.py --out custom_plots/
 """
 
 import argparse
+import glob
+import json
 import os
 import sys
 
@@ -12,7 +22,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 
@@ -21,97 +30,88 @@ import pandas as pd
 
 def parse_args():
     p = argparse.ArgumentParser(description="Plot MorphoEvo evolution stats.")
-    p.add_argument("--csv", default="evolution_data.csv")
-    p.add_argument("--out", default="plots/")
+    p.add_argument("--csv",     default=None, help="Explicit CSV path.")
+    p.add_argument("--session", default=None, help="Session directory containing stats.csv.")
+    p.add_argument("--out",     default=None, help="Output directory for plots.")
+    p.add_argument("--data-dir", default="data", help="Root dir holding session_*/ folders.")
     return p.parse_args()
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+def resolve_paths(args):
+    """Return (csv_path, out_dir, session_meta_or_None)."""
+    if args.csv:
+        csv_path = args.csv
+        out_dir  = args.out or os.path.join(os.path.dirname(csv_path) or ".", "plots")
+        return csv_path, out_dir, None
 
-ENV_COLORS        = {"A": "#2196F3", "B": "#FF9800"}   # blue / orange
-ALPHA_RUN         = 0.25
-EXPLOSION_THRESHOLD = 1e6   # fitness above this = physics explosion
+    session_dir = args.session
+    if session_dir is None:
+        pattern   = os.path.join(args.data_dir, "session_*")
+        sessions  = sorted(glob.glob(pattern))
+        if not sessions:
+            sys.exit(f"[error] No sessions found under {pattern}. "
+                     f"Run a simulation first, or pass --csv.")
+        session_dir = sessions[-1]
+
+    csv_path = os.path.join(session_dir, "stats.csv")
+    if not os.path.exists(csv_path):
+        sys.exit(f"[error] stats.csv not found in {session_dir}")
+
+    out_dir = args.out or os.path.join(session_dir, "plots")
+
+    meta_path = os.path.join(session_dir, "session.json")
+    meta = None
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+
+    return csv_path, out_dir, meta
+
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+ENV_COLORS          = {"A": "#2196F3", "B": "#FF9800"}
+EXPLOSION_THRESHOLD = 1e6
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
-def load_runs(csv_path):
-    """Split CSV into individual runs (each run starts at generation == 1).
-    Runs where the best fitness ever exceeds EXPLOSION_THRESHOLD are flagged.
-    """
+def load_csv(csv_path):
     df = pd.read_csv(csv_path)
 
-    boundaries = df.index[df["generation"] == 1].tolist()
-    boundaries.append(len(df))
+    # Clip explosions to keep plots legible
+    for col in df.columns:
+        if col.startswith(("best_", "avg_", "min_", "max_", "median_", "p25_", "p75_", "std_")):
+            df[col] = df[col].clip(lower=-EXPLOSION_THRESHOLD, upper=EXPLOSION_THRESHOLD)
 
-    runs = []
-    for i, start in enumerate(boundaries[:-1]):
-        end    = boundaries[i + 1]
-        run_df = df.iloc[start:end].copy().reset_index(drop=True)
-        run_df["run"] = i + 1
-        peak   = run_df[["best_fitness_a", "best_fitness_b"]].max().max()
-        run_df["exploded"] = bool(peak > EXPLOSION_THRESHOLD)
-        runs.append(run_df)
-
-    return runs
+    return df
 
 
-def summary_table(runs):
-    rows = []
-    for run in runs:
-        rows.append({
-            "run":           run["run"].iloc[0],
-            "n_gen":         len(run),
-            "exploded":      run["exploded"].iloc[0],
-            "peak_fit_a":    run["best_fitness_a"].clip(upper=EXPLOSION_THRESHOLD).max(),
-            "peak_fit_b":    run["best_fitness_b"].clip(upper=EXPLOSION_THRESHOLD).max(),
-            "final_avg_a":   run["avg_fitness_a"].iloc[-1],
-            "final_avg_b":   run["avg_fitness_b"].iloc[-1],
-            "final_div_a":   run["diversity_a"].iloc[-1],
-            "final_div_b":   run["diversity_b"].iloc[-1],
-            "final_cmplx_a": run["avg_complexity_a"].iloc[-1],
-            "final_cmplx_b": run["avg_complexity_b"].iloc[-1],
-        })
-    return pd.DataFrame(rows)
+# ── Plot helpers ─────────────────────────────────────────────────────────────
+
+def _line_both(ax, df, col_a, col_b, ylabel, title,
+               label_a="Env A (Plaine)", label_b="Env B (Terrain)",
+               logy=False):
+    g = df["generation"]
+    if col_a in df.columns:
+        ax.plot(g, df[col_a], color=ENV_COLORS["A"], lw=2.0, label=label_a)
+    if col_b in df.columns:
+        ax.plot(g, df[col_b], color=ENV_COLORS["B"], lw=2.0, label=label_b)
+    ax.set_xlabel("Generation")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    if logy:
+        ax.set_yscale("symlog")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _runs_mean(runs, col, skip_exploded=True):
-    """Return (gens, mean, std) on a common generation grid.
-    Exploded runs are excluded from the mean by default.
-    """
-    valid = [r for r in runs if not (skip_exploded and r["exploded"].iloc[0])]
-    if not valid:
-        valid = runs
-    max_gen = max(len(r) for r in valid)
-    matrix  = np.full((len(valid), max_gen), np.nan)
-    for i, r in enumerate(valid):
-        vals = np.clip(r[col].values.astype(float), None, EXPLOSION_THRESHOLD)
-        matrix[i, :len(vals)] = vals
-    return np.arange(1, max_gen + 1), np.nanmean(matrix, axis=0), np.nanstd(matrix, axis=0)
-
-
-def _plot_metric_both_envs(ax, runs, col_a, col_b, ylabel, title,
-                            label_a="Env A (Plain)", label_b="Env B (Terrain)"):
-    for r in runs:
-        gens     = r["generation"].values
-        exploded = r["exploded"].iloc[0]
-        style    = dict(alpha=0.10, lw=0.6, linestyle="--") if exploded \
-                   else dict(alpha=ALPHA_RUN, lw=0.8)
-        ax.plot(gens, np.clip(r[col_a].values, None, EXPLOSION_THRESHOLD),
-                color=ENV_COLORS["A"], **style)
-        ax.plot(gens, np.clip(r[col_b].values, None, EXPLOSION_THRESHOLD),
-                color=ENV_COLORS["B"], **style)
-
-    g_a, m_a, s_a = _runs_mean(runs, col_a)
-    g_b, m_b, s_b = _runs_mean(runs, col_b)
-
-    ax.plot(g_a, m_a, color=ENV_COLORS["A"], lw=2.0, label=label_a)
-    ax.fill_between(g_a, m_a - s_a, m_a + s_a, color=ENV_COLORS["A"], alpha=0.15)
-    ax.plot(g_b, m_b, color=ENV_COLORS["B"], lw=2.0, label=label_b)
-    ax.fill_between(g_b, m_b - s_b, m_b + s_b, color=ENV_COLORS["B"], alpha=0.15)
-
+def _band_both(ax, df, lo_a, hi_a, mid_a, lo_b, hi_b, mid_b, title, ylabel):
+    g = df["generation"]
+    ax.fill_between(g, df[lo_a], df[hi_a], color=ENV_COLORS["A"], alpha=0.20)
+    ax.plot(g, df[mid_a], color=ENV_COLORS["A"], lw=2.0, label="Env A median")
+    ax.fill_between(g, df[lo_b], df[hi_b], color=ENV_COLORS["B"], alpha=0.20)
+    ax.plot(g, df[mid_b], color=ENV_COLORS["B"], lw=2.0, label="Env B median")
     ax.set_xlabel("Generation")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -119,266 +119,261 @@ def _plot_metric_both_envs(ax, runs, col_a, col_b, ylabel, title,
     ax.grid(True, alpha=0.3)
 
 
-# ── Plot 1 : Fitness (best + avg) ─────────────────────────────────────────────
+# ── Plots ────────────────────────────────────────────────────────────────────
 
-def plot_fitness(runs, out_dir):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+def plot_fitness(df, out_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     fig.suptitle("Evolution de la fitness", fontsize=14, fontweight="bold")
 
-    _plot_metric_both_envs(
-        axes[0], runs,
-        "best_fitness_a", "best_fitness_b",
-        "Meilleure fitness", "Meilleure fitness par generation"
-    )
-    _plot_metric_both_envs(
-        axes[1], runs,
-        "avg_fitness_a", "avg_fitness_b",
-        "Fitness moyenne", "Fitness moyenne par generation"
-    )
+    _line_both(axes[0, 0], df, "best_a",   "best_b",   "Fitness",  "Meilleure fitness")
+    _line_both(axes[0, 1], df, "avg_a",    "avg_b",    "Fitness",  "Fitness moyenne")
+    _band_both(axes[1, 0], df, "p25_a", "p75_a", "median_a",
+                              "p25_b", "p75_b", "median_b",
+                              "Distribution fitness (p25-p75, mediane)", "Fitness")
+    _line_both(axes[1, 1], df, "std_a",    "std_b",    "sigma",    "Ecart-type fitness")
 
-    axes[0].set_xlabel("")
     fig.tight_layout()
     path = os.path.join(out_dir, "01_fitness.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print("  -> " + path)
+    print(f"  -> {path}")
 
 
-# ── Plot 2 : Diversity ────────────────────────────────────────────────────────
+def plot_diversity(df, out_dir):
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Diversite et divergence", fontsize=13, fontweight="bold")
 
-def plot_diversity(runs, out_dir):
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.suptitle("Diversite morphologique (ecart-type du nombre de segments)", fontsize=13)
+    _line_both(axes[0], df, "diversity_a", "diversity_b",
+               "sigma segments", "Diversite morphologique (std segments)")
 
-    _plot_metric_both_envs(
-        ax, runs,
-        "diversity_a", "diversity_b",
-        "Diversite (sigma segments)", "Diversite au fil des generations"
-    )
-
-    g, m, _ = _runs_mean(runs, "diversity_a")
-    collapse = np.where(m < 0.1)[0]
-    if len(collapse):
-        first = int(collapse[0]) + 1
-        ax.axvline(first, color=ENV_COLORS["A"], linestyle="--", alpha=0.6,
-                   label="Collapse Env A ~ gen " + str(first))
-        ax.legend(fontsize=8)
+    ax = axes[1]
+    if "genotype_dist_ab" in df.columns:
+        ax.plot(df["generation"], df["genotype_dist_ab"],
+                color="#8E44AD", lw=2.0, label="mean dist(A,B)")
+    ax.set_title("Divergence genotypique A <-> B")
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Distance genotype (Euclidean)")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     path = os.path.join(out_dir, "02_diversity.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print("  -> " + path)
+    print(f"  -> {path}")
 
 
-# ── Plot 3 : Complexity ───────────────────────────────────────────────────────
+def plot_morphology(df, out_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig.suptitle("Morphologie des populations", fontsize=13, fontweight="bold")
 
-def plot_complexity(runs, out_dir):
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.suptitle("Complexite morphologique (nb moyen de segments)", fontsize=13)
-
-    _plot_metric_both_envs(
-        ax, runs,
-        "avg_complexity_a", "avg_complexity_b",
-        "Segments moyens", "Complexite au fil des generations"
-    )
+    _line_both(axes[0, 0], df, "avg_segments_a", "avg_segments_b",
+               "Segments", "Segments moyens")
+    _line_both(axes[0, 1], df, "max_segments_a", "max_segments_b",
+               "Segments", "Segments max")
+    _line_both(axes[1, 0], df, "avg_depth_a", "avg_depth_b",
+               "Profondeur", "Profondeur moyenne de l'arbre")
+    _line_both(axes[1, 1], df, "avg_branching_a", "avg_branching_b",
+               "Enfants / noeud", "Facteur de branchement moyen")
 
     fig.tight_layout()
-    path = os.path.join(out_dir, "03_complexity.png")
+    path = os.path.join(out_dir, "03_morphology.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print("  -> " + path)
+    print(f"  -> {path}")
 
 
-# ── Plot 4 : Inter-run comparison (bar chart) ─────────────────────────────────
+def plot_physical(df, out_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig.suptitle("Metriques physiques", fontsize=13, fontweight="bold")
 
-def plot_run_comparison(runs, out_dir):
-    smry = summary_table(runs)
-    n  = len(smry)
-    x  = np.arange(n)
-    w  = 0.35
+    _line_both(axes[0, 0], df, "avg_distance_a", "avg_distance_b",
+               "Distance (px)", "Distance parcourue moyenne")
+    _line_both(axes[0, 1], df, "avg_energy_a", "avg_energy_b",
+               "Energie", "Energie metabolique moyenne", logy=True)
+    _line_both(axes[1, 0], df, "avg_stability_a", "avg_stability_b",
+               "Stabilite [0-1]", "Stabilite du tronc")
+    _line_both(axes[1, 1], df, "avg_mass_a", "avg_mass_b",
+               "Masse", "Masse totale moyenne")
 
+    fig.tight_layout()
+    path = os.path.join(out_dir, "04_physical.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  -> {path}")
+
+
+def plot_genes(df, out_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig.suptitle("Derive des genes (moyenne population)", fontsize=13,
+                 fontweight="bold")
+
+    _line_both(axes[0, 0], df, "avg_motor_force_a", "avg_motor_force_b",
+               "Force",  "Motor force")
+    _line_both(axes[0, 1], df, "avg_motor_speed_a", "avg_motor_speed_b",
+               "Vitesse", "Motor speed")
+    _line_both(axes[1, 0], df, "avg_friction_a", "avg_friction_b",
+               "Friction", "Friction segments")
+    _line_both(axes[1, 1], df, "avg_damping_a", "avg_damping_b",
+               "Damping", "Joint damping")
+
+    fig.tight_layout()
+    path = os.path.join(out_dir, "05_genes.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  -> {path}")
+
+
+def plot_selection(df, out_dir):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle("Comparaison des runs - Peak fitness & complexite finale", fontsize=13)
+    fig.suptitle("Pression de selection et cout temporel", fontsize=13,
+                 fontweight="bold")
 
-    # Peak fitness (clipped)
-    ax = axes[0]
-    bars_a = ax.bar(x - w/2, smry["peak_fit_a"], w, label="Env A", color=ENV_COLORS["A"])
-    bars_b = ax.bar(x + w/2, smry["peak_fit_b"], w, label="Env B", color=ENV_COLORS["B"])
-    # Mark exploded runs with a hatching
-    for idx, row in smry.iterrows():
-        if row["exploded"]:
-            bars_a[idx].set_hatch("//")
-            bars_b[idx].set_hatch("//")
-    ax.set_xticks(x)
-    ax.set_xticklabels(["Run " + str(r) for r in smry["run"]], rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Fitness maximale (clippee a 1e6)")
-    ax.set_title("Pic de fitness par run")
-    ax.legend()
-    ax.grid(True, axis="y", alpha=0.3)
+    _line_both(axes[0], df, "sel_intensity_a", "sel_intensity_b",
+               "(best-mean)/sigma", "Intensite de selection")
 
-    # Final complexity
     ax = axes[1]
-    ax.bar(x - w/2, smry["final_cmplx_a"], w, label="Env A", color=ENV_COLORS["A"])
-    ax.bar(x + w/2, smry["final_cmplx_b"], w, label="Env B", color=ENV_COLORS["B"])
-    ax.set_xticks(x)
-    ax.set_xticklabels(["Run " + str(r) for r in smry["run"]], rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Segments moyens (derniere gen)")
-    ax.set_title("Complexite finale par run")
-    ax.legend()
-    ax.grid(True, axis="y", alpha=0.3)
+    if "wall_time_s" in df.columns:
+        ax.plot(df["generation"], df["wall_time_s"],
+                color="#2ECC71", lw=1.8, label="wall time")
+    ax.set_title("Temps mur par generation")
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Secondes")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    path = os.path.join(out_dir, "04_run_comparison.png")
+    path = os.path.join(out_dir, "06_selection_timing.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print("  -> " + path)
+    print(f"  -> {path}")
 
 
-# ── Plot 5 : Dashboard (2x3) ─────────────────────────────────────────────────
+def plot_correlation(df, out_dir):
+    """Scatter: complexity vs best fitness (all gens lumped)."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Correlations complexite <-> fitness", fontsize=13,
+                 fontweight="bold")
 
-def plot_dashboard(runs, out_dir):
-    fig = plt.figure(figsize=(18, 10))
-    fig.suptitle("MorphoEvo - Dashboard d'analyse evolutive", fontsize=15, fontweight="bold")
-    gs  = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.35)
-
-    ax_best  = fig.add_subplot(gs[0, 0])
-    ax_avg   = fig.add_subplot(gs[0, 1])
-    ax_div   = fig.add_subplot(gs[0, 2])
-    ax_cmplx = fig.add_subplot(gs[1, 0])
-    ax_corr  = fig.add_subplot(gs[1, 1])
-    ax_box   = fig.add_subplot(gs[1, 2])
-
-    _plot_metric_both_envs(ax_best, runs, "best_fitness_a", "best_fitness_b",
-                           "Fitness", "Meilleure fitness")
-    _plot_metric_both_envs(ax_avg,  runs, "avg_fitness_a",  "avg_fitness_b",
-                           "Fitness", "Fitness moyenne")
-    _plot_metric_both_envs(ax_div,  runs, "diversity_a",    "diversity_b",
-                           "sigma segments", "Diversite")
-    _plot_metric_both_envs(ax_cmplx, runs, "avg_complexity_a", "avg_complexity_b",
-                           "Segments", "Complexite moyenne")
-
-    # Scatter: complexity vs best fitness (valid runs only)
-    valid_runs = [r for r in runs if not r["exploded"].iloc[0]]
-    all_data   = pd.concat(valid_runs, ignore_index=True) if valid_runs else pd.concat(runs)
-    ax_corr.scatter(all_data["avg_complexity_a"], all_data["best_fitness_a"],
-                    color=ENV_COLORS["A"], alpha=0.3, s=10, label="Env A")
-    ax_corr.scatter(all_data["avg_complexity_b"], all_data["best_fitness_b"],
-                    color=ENV_COLORS["B"], alpha=0.3, s=10, label="Env B")
-    for col_x, col_y, col in [
-        ("avg_complexity_a", "best_fitness_a", ENV_COLORS["A"]),
-        ("avg_complexity_b", "best_fitness_b", ENV_COLORS["B"]),
-    ]:
-        xv   = all_data[col_x].values
-        yv   = all_data[col_y].values
-        mask = np.isfinite(xv) & np.isfinite(yv)
+    for ax, env in zip(axes, ("a", "b")):
+        x = df[f"avg_segments_{env}"]
+        y = df[f"best_{env}"]
+        ax.scatter(x, y, alpha=0.55, s=18,
+                   color=ENV_COLORS[env.upper()])
+        mask = np.isfinite(x) & np.isfinite(y)
         if mask.sum() > 2:
-            coef = np.polyfit(xv[mask], yv[mask], 1)
-            xr   = np.linspace(xv[mask].min(), xv[mask].max(), 100)
-            ax_corr.plot(xr, np.polyval(coef, xr), color=col, lw=1.5)
-    ax_corr.set_xlabel("Complexite moyenne")
-    ax_corr.set_ylabel("Meilleure fitness")
-    ax_corr.set_title("Complexite vs Fitness")
-    ax_corr.legend(fontsize=7)
-    ax_corr.grid(True, alpha=0.3)
+            coef = np.polyfit(x[mask], y[mask], 1)
+            xr   = np.linspace(x[mask].min(), x[mask].max(), 100)
+            ax.plot(xr, np.polyval(coef, xr),
+                    color=ENV_COLORS[env.upper()], lw=1.5,
+                    label=f"linreg slope={coef[0]:.1f}")
+        ax.set_xlabel("Segments moyens")
+        ax.set_ylabel("Best fitness")
+        ax.set_title(f"Env {env.upper()}")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
 
-    # Box: best fitness distribution per run (clipped)
-    smry        = summary_table(runs)
-    run_ids     = smry["run"].values
-    data_a      = [np.clip(r["best_fitness_a"].values, None, EXPLOSION_THRESHOLD) for r in runs]
-    data_b      = [np.clip(r["best_fitness_b"].values, None, EXPLOSION_THRESHOLD) for r in runs]
-    positions_a = np.arange(len(runs)) * 2
-    positions_b = positions_a + 0.8
+    fig.tight_layout()
+    path = os.path.join(out_dir, "07_correlation.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  -> {path}")
 
-    ax_box.boxplot(data_a, positions=positions_a, widths=0.6,
-                   patch_artist=True, boxprops=dict(facecolor=ENV_COLORS["A"], alpha=0.6),
-                   medianprops=dict(color="white", lw=2),
-                   whiskerprops=dict(color=ENV_COLORS["A"]),
-                   capprops=dict(color=ENV_COLORS["A"]),
-                   flierprops=dict(marker=".", color=ENV_COLORS["A"], alpha=0.4))
-    ax_box.boxplot(data_b, positions=positions_b, widths=0.6,
-                   patch_artist=True, boxprops=dict(facecolor=ENV_COLORS["B"], alpha=0.6),
-                   medianprops=dict(color="white", lw=2),
-                   whiskerprops=dict(color=ENV_COLORS["B"]),
-                   capprops=dict(color=ENV_COLORS["B"]),
-                   flierprops=dict(marker=".", color=ENV_COLORS["B"], alpha=0.4))
 
-    ax_box.set_xticks(positions_a + 0.4)
-    ax_box.set_xticklabels(["R" + str(r) for r in run_ids], fontsize=7)
-    ax_box.set_ylabel("Meilleure fitness (clippee)")
-    ax_box.set_title("Distribution fitness / run")
-    ax_box.legend(handles=[
-        Patch(facecolor=ENV_COLORS["A"], label="Env A"),
-        Patch(facecolor=ENV_COLORS["B"], label="Env B"),
-    ], fontsize=7)
-    ax_box.grid(True, axis="y", alpha=0.3)
+def plot_dashboard(df, out_dir):
+    fig = plt.figure(figsize=(18, 11))
+    fig.suptitle("MorphoEvo - Dashboard", fontsize=15, fontweight="bold")
+    gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.50, wspace=0.35)
+
+    _line_both(fig.add_subplot(gs[0, 0]), df, "best_a", "best_b",
+               "Fitness", "Meilleure fitness")
+    _line_both(fig.add_subplot(gs[0, 1]), df, "avg_a", "avg_b",
+               "Fitness", "Fitness moyenne")
+    ax = fig.add_subplot(gs[0, 2])
+    _band_both(ax, df, "p25_a", "p75_a", "median_a",
+                        "p25_b", "p75_b", "median_b",
+                        "Distribution (p25-p75)", "Fitness")
+
+    _line_both(fig.add_subplot(gs[1, 0]), df, "diversity_a", "diversity_b",
+               "sigma segs", "Diversite")
+    _line_both(fig.add_subplot(gs[1, 1]), df, "avg_segments_a", "avg_segments_b",
+               "Segments", "Complexite")
+    _line_both(fig.add_subplot(gs[1, 2]), df, "avg_depth_a", "avg_depth_b",
+               "Depth", "Profondeur arbre")
+
+    _line_both(fig.add_subplot(gs[2, 0]), df, "avg_distance_a", "avg_distance_b",
+               "px", "Distance")
+    _line_both(fig.add_subplot(gs[2, 1]), df, "avg_energy_a", "avg_energy_b",
+               "E", "Energie", logy=True)
+
+    ax_div = fig.add_subplot(gs[2, 2])
+    if "genotype_dist_ab" in df.columns:
+        ax_div.plot(df["generation"], df["genotype_dist_ab"],
+                    color="#8E44AD", lw=2.0)
+    ax_div.set_title("Divergence A <-> B")
+    ax_div.set_xlabel("Generation")
+    ax_div.set_ylabel("Distance genotype")
+    ax_div.grid(True, alpha=0.3)
 
     path = os.path.join(out_dir, "00_dashboard.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print("  -> " + path)
+    print(f"  -> {path}")
 
 
-# ── Plot 6 : Heatmap (runs x generation) ─────────────────────────────────────
+# ── Summary ──────────────────────────────────────────────────────────────────
 
-def plot_heatmap(runs, out_dir):
-    max_gen = max(len(r) for r in runs)
-    n_runs  = len(runs)
+def print_summary(df, meta):
+    print("=== Session summary ===")
+    if meta:
+        for k in ("n_creatures", "gen_duration", "speed_mode", "timestamp"):
+            if k in meta:
+                print(f"  {k:>16}: {meta[k]}")
+    print(f"  {'generations':>16}: {len(df)}")
+    if "wall_time_s" in df.columns:
+        print(f"  {'total wall time':>16}: {df['wall_time_s'].sum():.1f}s")
+    print()
 
-    for env, col in [("A", "best_fitness_a"), ("B", "best_fitness_b")]:
-        matrix = np.full((n_runs, max_gen), np.nan)
-        for i, r in enumerate(runs):
-            vals = np.clip(r[col].values.astype(float), None, EXPLOSION_THRESHOLD)
-            matrix[i, :len(vals)] = vals
-
-        fig, ax = plt.subplots(figsize=(14, max(4, n_runs * 0.55)))
-        im = ax.imshow(matrix, aspect="auto", cmap="viridis",
-                       interpolation="nearest",
-                       extent=[1, max_gen, n_runs + 0.5, 0.5])
-        plt.colorbar(im, ax=ax, label="Meilleure fitness (clippee)")
-        ax.set_xlabel("Generation")
-        ax.set_ylabel("Run")
-        ax.set_yticks(range(1, n_runs + 1))
-        ax.set_yticklabels(["Run " + str(i + 1) for i in range(n_runs)], fontsize=8)
-        ax.set_title("Heatmap fitness - Env " + env + " (" + col + ")")
-        fig.tight_layout()
-        path = os.path.join(out_dir, "05_heatmap_env" + env.lower() + ".png")
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        print("  -> " + path)
+    rows = []
+    for env in ("a", "b"):
+        rows.append([
+            env.upper(),
+            df[f"best_{env}"].max(),
+            df[f"avg_{env}"].mean(),
+            df[f"avg_segments_{env}"].iloc[-1],
+            df[f"avg_distance_{env}"].iloc[-1],
+        ])
+    summary = pd.DataFrame(rows, columns=[
+        "env", "peak_best", "mean_avg", "final_segments", "final_distance"
+    ])
+    print(summary.to_string(index=False))
+    print()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
+    csv_path, out_dir, meta = resolve_paths(args)
 
-    if not os.path.exists(args.csv):
-        sys.exit("[error] CSV non trouve : " + args.csv)
+    os.makedirs(out_dir, exist_ok=True)
 
-    os.makedirs(args.out, exist_ok=True)
-
-    print("Chargement de " + args.csv + " ...")
-    runs = load_runs(args.csv)
-    n_exploded = sum(1 for r in runs if r["exploded"].iloc[0])
-    print("  " + str(len(runs)) + " run(s) detectes, "
-          + str(sum(len(r) for r in runs)) + " lignes au total.")
-    if n_exploded:
-        print("  /!\\ " + str(n_exploded) + " run(s) avec explosion physique (fitness > 1e6) - traces en pointilles.")
+    print(f"Loading {csv_path}")
+    df = load_csv(csv_path)
+    print(f"  {len(df)} generations")
     print()
 
-    smry = summary_table(runs)
-    print("=== Resume par run ===")
-    print(smry.to_string(index=False))
-    print()
+    print_summary(df, meta)
 
-    print("Generation des graphiques dans " + args.out)
-    plot_dashboard(runs, args.out)
-    plot_fitness(runs, args.out)
-    plot_diversity(runs, args.out)
-    plot_complexity(runs, args.out)
-    plot_run_comparison(runs, args.out)
-    plot_heatmap(runs, args.out)
+    print(f"Generating plots in {out_dir}")
+    plot_dashboard(df, out_dir)
+    plot_fitness(df, out_dir)
+    plot_diversity(df, out_dir)
+    plot_morphology(df, out_dir)
+    plot_physical(df, out_dir)
+    plot_genes(df, out_dir)
+    plot_selection(df, out_dir)
+    plot_correlation(df, out_dir)
 
     print()
     print("Termine.")
